@@ -470,15 +470,22 @@ class Plot:
     def footer():
         return ["</svg>"]
 
-    def frame(self):
-        # Single rect = full box around the plot area (left, right, top, bottom).
-        x = MARGIN_LEFT
-        y = MARGIN_TOP
-        w = self.width - MARGIN_LEFT - MARGIN_RIGHT
-        h = self.height - MARGIN_TOP - MARGIN_BOTTOM
+    def frame(self, left_color="black", right_color="black"):
+        """Draw the four edges of the plot area as separate lines so the
+        left and right verticals can be tinted to match their series.
+
+        Top and bottom stay black: they're shared between both axes and
+        belong to the chart's chrome rather than to either series.
+        """
+        L = MARGIN_LEFT
+        R = self.width - MARGIN_RIGHT
+        T = MARGIN_TOP
+        B = self.height - MARGIN_BOTTOM
         return [
-            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
-            f'fill="none" stroke="black"/>',
+            f'<line x1="{L}" y1="{T}" x2="{R}" y2="{T}" stroke="black"/>',
+            f'<line x1="{L}" y1="{B}" x2="{R}" y2="{B}" stroke="black"/>',
+            f'<line x1="{L}" y1="{T}" x2="{L}" y2="{B}" stroke="{left_color}"/>',
+            f'<line x1="{R}" y1="{T}" x2="{R}" y2="{B}" stroke="{right_color}"/>',
         ]
 
     # --- X axis (time) ------------------------------------------------------
@@ -639,7 +646,12 @@ def render(series_list, log_y=False, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
     if markers_used:
         out.append("<defs>" + "".join(MARKER_DEFS[m] for m in markers_used) + "</defs>")
 
-    out += plot.frame()
+    # Tint the left/right verticals to match their series so each spine
+    # visually "owns" its axis. With only one series the right vertical
+    # stays black — there's no second series to attach it to.
+    left_spine = parsed[0][2]
+    right_spine = parsed[1][2] if len(series_list) == 2 else "black"
+    out += plot.frame(left_color=left_spine, right_color=right_spine)
 
     sides = ["left", "right"]
     for i, (kind, pts) in enumerate(series_list):
@@ -760,25 +772,45 @@ def _emit(sinks, line):
         s.flush()
 
 
-def record_ping(host, output_path):
-    """Run `ping -D <host>` and stream its output to stdout (and optional file).
+PING_INTERVAL_SECONDS = 1.0
 
-    `ping -D` already prefixes each reply with a `[unix-seconds.microseconds]`
-    tag, so we just forward the lines verbatim.
+
+def record_ping(host, output_path):
+    """Send one ping per second, recording each reply with its timestamp.
+
+    Spawns a fresh ``ping -c 1 -D <host>`` process for every probe
+    rather than letting a single long-running ``ping`` stream samples.
+    The reason is gnosisVPN-specific: a long-running ping reuses the
+    same routing/path state inside the tunnel, which the kernel and
+    intermediate hops cache. Each new process forces a new DNS lookup,
+    a new ICMP socket, and a new tunnel session — giving an honest
+    measurement instead of a hot-path one.
+
+    Lines that don't carry a `[ts]` reply (the "PING ... data bytes"
+    banner and the per-probe statistics block) are filtered out so the
+    recording stays clean and matches the format the plotter expects.
     """
-    cmd = ["ping", "-D", host]
+    cmd = ["ping", "-c", "1", "-W", "1", "-D", host]
     sinks, fh = _open_sinks(output_path)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1, text=True)
     try:
-        for line in proc.stdout:
-            _emit(sinks, line)
+        while True:
+            t0 = time.monotonic()
+            try:
+                proc = subprocess.run(cmd, capture_output=True, text=True)
+            except FileNotFoundError as e:
+                sys.exit(str(e))
+            for line in proc.stdout.splitlines():
+                if TIMESTAMP_RE.search(line):
+                    _emit(sinks, line + "\n")
+            sleep_for = PING_INTERVAL_SECONDS - (time.monotonic() - t0)
+            if sleep_for > 0:
+                time.sleep(sleep_for)
     except KeyboardInterrupt:
-        proc.terminate()
+        pass
     finally:
-        proc.wait()
         if fh is not None:
             fh.close()
-    return proc.returncode
+    return 0
 
 
 def record_curl(url, output_path):
@@ -848,12 +880,6 @@ def cmd_plot(args):
         series = [parse_recording(p) for p in args.files]
     except (FileNotFoundError, ValueError) as e:
         sys.exit(str(e))
-
-    if args.double_y and len({k for k, _ in series}) == 1:
-        sys.stderr.write(
-            f'warning: both inputs parse as "{series[0][0]}" — '
-            "the right axis will duplicate the left.\n"
-        )
 
     try:
         svg = render(

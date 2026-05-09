@@ -41,10 +41,19 @@ Run any subcommand with `--help` for the full option list.
 ./gnosis_vpn-monitor ping example.org -o run.txt # custom output file
 ```
 
-Internally this is `ping -D <host>` — `-D` prefixes every reply line with
-a `[unix-seconds.microseconds]` tag, which is what the plotter keys off.
-Output is teed to stdout so you see progress live; a copy is also
-written to `data/ping.txt` by default. Stop with Ctrl-C.
+Internally this spawns a fresh `ping -c 1 -W 1 -D <host>` process
+once per second rather than letting a single long-running `ping`
+stream samples. That matters for gnosisVPN: a continuous `ping`
+reuses the same tunnel/path state, which the kernel and intermediate
+hops cache, biasing measurements toward the hot path. A new process
+each second forces a new DNS lookup, a new ICMP socket and a new
+tunnel session, giving honest per-probe numbers.
+
+`-D` prefixes every reply line with a `[unix-seconds.microseconds]`
+tag, which is what the plotter keys off. Banner and statistics lines
+emitted by `ping` are filtered out, so the recording is one clean
+reply per line. Output is teed to stdout (live) and written to
+`data/ping.txt` by default. Stop with Ctrl-C.
 
 ### Curl throughput
 
