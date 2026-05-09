@@ -131,23 +131,22 @@ def parse_recording(path):
 # ---------------------------------------------------------------------------
 
 def format_ms(v):
-    """Tick label for a millisecond value."""
-    if v <= 0:
+    """Tick label for a millisecond value (e.g. 17.1, 100, 250)."""
+    if v == 0:
         return "0"
-    if v >= 100:
-        return f"{v:.0f}"
-    if v >= 10:
-        return f"{v:.1f}"
-    return f"{v:.2f}"
+    # %g drops trailing zeros — "20" rather than "20.0", "17.1" rather than "17.10".
+    return f"{v:g}"
 
 
 def format_bytes_per_second(v):
-    """Tick label for a bytes-per-second value, matching curl's units."""
+    """Tick label for a bytes-per-second value, using decimal SI prefixes
+    (1k = 1000) so labels for round tick values come out clean: a tick at
+    5_000_000 reads "5M" rather than the binary-1024 equivalent "4.8M"."""
     if v <= 0:
         return "0"
-    for unit, suffix in ((1024 ** 3, "G"), (1024 ** 2, "M"), (1024, "k")):
+    for unit, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "k")):
         if v >= unit:
-            return f"{v / unit:.1f}{suffix}"
+            return f"{v / unit:.3g}{suffix}"
     return f"{v:.0f}"
 
 
@@ -159,30 +158,77 @@ KIND_FORMATTER = {"ping": format_ms, "curl": format_bytes_per_second}
 # Tick generation
 # ---------------------------------------------------------------------------
 
+def nice_step(raw):
+    """Pick a 'nice' tick step — 1, 2, 5 or 10 × 10^k — close to `raw`.
+
+    This is the standard cartographic/plotting heuristic: round the
+    requested spacing to a nearby value whose mantissa is 1, 2, 5 or 10
+    so tick labels land on visually clean values (10, 20, 50, 100, …
+    rather than 9, 18, 45, 90).
+    """
+    if raw <= 0:
+        return 1
+    mag = 10 ** math.floor(math.log10(raw))
+    norm = raw / mag
+    if norm <= 1.5:
+        return 1 * mag
+    if norm <= 3:
+        return 2 * mag
+    if norm <= 7:
+        return 5 * mag
+    return 10 * mag
+
+
 def linear_ticks(lo, hi, n=5):
-    """Return ~n nicely rounded tick values inside [lo, hi]."""
+    """Return ~n tick values inside [lo, hi] at nice round increments."""
     if hi <= lo:
         return [lo]
-    raw_step = (hi - lo) / n
-    mag = 10 ** math.floor(math.log10(raw_step))
-    step = round(raw_step / mag) * mag or mag
-    start = math.ceil(lo / step) * step
+    step = nice_step((hi - lo) / n)
     out = []
-    v = start
+    v = math.ceil(lo / step) * step
     # The 1e-9 slack prevents floating-point error from dropping the last tick.
     while v <= hi + step * 1e-9:
-        out.append(v)
+        # Snap "should-be-zero" results to exactly 0 to suppress -0.0
+        # and the long tail of fp dust on what looks like a clean number.
+        out.append(0 if abs(v) < step * 1e-9 else round(v, 12))
         v += step
     return out
 
 
-def log_ticks(lo, hi):
-    """Return decade tick values (..., 1, 10, 100, ...) covering [lo, hi]."""
-    if lo <= 0:
-        lo = max(hi / 1e6, 1e-9)
+def log_decade_ticks(lo, hi):
+    """Decade tick values (..., 1, 10, 100, ...) that fall inside [lo, hi].
+
+    Only decades actually visible on the axis are returned, so we never
+    place a "10" label below the chart frame for a 75–800 axis.
+    """
+    if lo <= 0 or hi <= 0:
+        return []
+    lo_e = math.ceil(math.log10(lo) - 1e-9)
+    hi_e = math.floor(math.log10(hi) + 1e-9)
+    if hi_e < lo_e:
+        return []
+    return [10 ** e for e in range(lo_e, hi_e + 1)]
+
+
+def log_minor_ticks(lo, hi):
+    """Within-decade ticks (2..9 × 10^k) that fall inside [lo, hi].
+
+    These are the "200, 300, … 900" subdivisions that make a tightly
+    ranged log axis legible — without them a 100→1000 axis has only the
+    two endpoint labels for reference.
+    """
+    if lo <= 0 or hi <= 0:
+        return []
     lo_e = math.floor(math.log10(lo))
     hi_e = math.ceil(math.log10(hi))
-    return [10 ** e for e in range(lo_e, hi_e + 1)]
+    out = []
+    for e in range(lo_e, hi_e + 1):
+        base = 10 ** e
+        for m in range(2, 10):
+            v = m * base
+            if lo <= v <= hi:
+                out.append(v)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -192,11 +238,25 @@ def log_ticks(lo, hi):
 class Axis:
     """A y-axis: holds the value→pixel transform plus tick layout.
 
-    Linear axes start at zero and extend 10% past the maximum sample so
-    peaks don't hug the top of the chart. Log axes use one decade of
-    headroom on either side and skip non-positive samples (they have no
-    place on a log scale).
+    Linear axes pick a "nice" step from the data range and snap their
+    bounds to multiples of that step, so the topmost and bottommost
+    ticks land exactly on the chart frame at round values. Tight data
+    ranges therefore zoom in (a 110–170 ms ping trace ticks at every
+    10 ms instead of being squished against a 0–200 ms axis).
+
+    Log axes use one decade of headroom on either side of the data and
+    skip non-positive samples. Decade ticks are filtered to the visible
+    range, and within-decade minor ticks (2 × 10^k … 9 × 10^k) are added
+    when the axis spans fewer than ~3 decades — so the user can tell
+    apart 200, 300, 400 etc. without scrabbling for a ruler. Past
+    ~3 decades the minor ticks become noise and are dropped, leaving
+    decade markers to carry the chart.
     """
+
+    # Threshold (axis decades, post-padding) below which minor ticks are
+    # drawn. Picked so the canonical ping/curl ranges (~1–2 decades) get
+    # subdivisions but a 5-decade-wide chart doesn't.
+    _MINOR_TICK_DECADE_LIMIT = 4
 
     def __init__(self, kind, values, log=False):
         self.kind = kind
@@ -212,11 +272,22 @@ class Axis:
             self.hi = max(positive) * 2
             self.lo_t = math.log10(self.lo)
             self.hi_t = math.log10(self.hi)
+            self._show_minor = (self.hi_t - self.lo_t) < self._MINOR_TICK_DECADE_LIMIT
+            self._step = None
         else:
-            self.lo = 0
-            self.hi = (max(values) * 1.1) or 1
+            vmin, vmax = min(values), max(values)
+            if vmin == vmax:
+                # Constant series: invent a 1-unit window so the chart still draws.
+                vmin -= 0.5
+                vmax += 0.5
+            self._step = nice_step((vmax - vmin) / 5)
+            self.lo = math.floor(vmin / self._step) * self._step
+            self.hi = math.ceil(vmax / self._step) * self._step
+            if self.hi == self.lo:
+                self.hi = self.lo + self._step
             self.lo_t = self.lo
             self.hi_t = self.hi
+            self._show_minor = False
 
     def transform(self, v):
         """Map a data value to its position on the (transformed) axis."""
@@ -229,10 +300,25 @@ class Axis:
         """True if a sample can be drawn on this axis."""
         return not self.log or v > 0
 
-    def ticks(self):
+    def major_ticks(self):
+        """Labelled ticks: decades for log, snapped multiples for linear."""
         if self.log:
-            return log_ticks(self.lo, self.hi)
-        return linear_ticks(self.lo_t, self.hi_t)
+            decades = log_decade_ticks(self.lo, self.hi)
+            if decades:
+                return decades
+            # No decade fits inside a very tight log range — promote the
+            # minor ticks so the axis still gets some labels.
+            return log_minor_ticks(self.lo, self.hi)
+        return linear_ticks(self.lo, self.hi)
+
+    def minor_ticks(self):
+        """Unlabelled subdivision marks. Linear axes have none."""
+        if not self.log or not self._show_minor:
+            return []
+        if not log_decade_ticks(self.lo, self.hi):
+            # All ticks were already promoted to major (above).
+            return []
+        return log_minor_ticks(self.lo, self.hi)
 
 
 # ---------------------------------------------------------------------------
@@ -321,12 +407,31 @@ class Plot:
 
         `side` is ``"left"`` or ``"right"``. Gridlines are only drawn for
         the left axis to keep a double-y chart from looking like a fishnet.
+
+        Minor ticks (subdivisions inside a decade on a log axis) get
+        short marks but no label and no gridline — they're visual
+        rulers for reading off intermediate values, not labelled stops.
         """
         out = []
         left = MARGIN_LEFT
         right = WIDTH - MARGIN_RIGHT
 
-        for v in axis.ticks():
+        # Minor ticks first (they sit visually behind the major marks).
+        for v in axis.minor_ticks():
+            py = self.y_pixel(v, axis)
+            if side == "left":
+                out.append(
+                    f'<line x1="{left - 2}" y1="{py}" x2="{left}" y2="{py}" '
+                    f'stroke="{color}"/>'
+                )
+            else:
+                out.append(
+                    f'<line x1="{right}" y1="{py}" x2="{right + 2}" y2="{py}" '
+                    f'stroke="{color}"/>'
+                )
+
+        # Major ticks: longer mark, gridline (left axis only), label.
+        for v in axis.major_ticks():
             py = self.y_pixel(v, axis)
             if side == "left":
                 out.append(
