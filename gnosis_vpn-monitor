@@ -21,6 +21,7 @@ import argparse
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -508,6 +509,69 @@ def render(series_list, log_y=False):
 
 
 # ---------------------------------------------------------------------------
+# Output naming and SVG → PNG conversion
+# ---------------------------------------------------------------------------
+
+# Filename timestamp shape requested by the user: dashes everywhere, with a
+# double dash separating the date from the time so it stays sortable and
+# readable on case-insensitive filesystems.
+TIMESTAMP_FORMAT = "%Y-%m-%d--%H-%M-%S"
+
+# SVG → PNG converters tried in order. The first one whose binary is on
+# $PATH wins. All four are well-known Linux tools:
+#   - librsvg's `rsvg-convert` (smallest dependency, sharpest output)
+#   - ImageMagick 7's `magick` and 6's `convert`
+#   - Inkscape (heavier, but ubiquitous on desktops)
+# If none is installed, the SVG is still written; we just warn that the PNG
+# couldn't be produced. Templates use ``{svg}`` / ``{png}`` placeholders.
+SVG_TO_PNG_TOOLS = [
+    ["rsvg-convert", "-o", "{png}", "{svg}"],
+    ["magick", "{svg}", "{png}"],
+    ["convert", "{svg}", "{png}"],
+    ["inkscape", "{svg}", "--export-type=png", "--export-filename={png}"],
+]
+
+
+def auto_output_path(series_list):
+    """Default SVG path for a chart, e.g. output/ping-2026-05-09--12-30-00.svg.
+
+    The prefix tracks what's being plotted: a single recording uses its
+    own kind ("ping" or "curl"); a double-y chart uses "combined" since
+    both kinds are on the same plot.
+    """
+    if len(series_list) == 1:
+        prefix = series_list[0][0]  # "ping" or "curl"
+    else:
+        prefix = "combined"
+    ts = datetime.now().strftime(TIMESTAMP_FORMAT)
+    return os.path.join(OUTPUT_DIR, f"{prefix}-{ts}.svg")
+
+
+def svg_to_png(svg_path):
+    """Render `svg_path` to a sibling .png file.
+
+    Returns the PNG path on success, or None if no converter on the
+    system was able to do the job. Stderr from the converter is
+    swallowed so a working tool produces clean output; on full failure
+    the caller logs a single suggestion line.
+    """
+    png_path = os.path.splitext(svg_path)[0] + ".png"
+    for template in SVG_TO_PNG_TOOLS:
+        if not shutil.which(template[0]):
+            continue
+        cmd = [arg.format(svg=svg_path, png=png_path) for arg in template]
+        try:
+            subprocess.run(
+                cmd, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return png_path
+        except subprocess.CalledProcessError:
+            continue
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Recording
 # ---------------------------------------------------------------------------
 #
@@ -639,14 +703,28 @@ def cmd_plot(args):
     except ValueError as e:
         sys.exit(str(e))
 
-    if args.output == "-":
+    output = args.output if args.output is not None else auto_output_path(series)
+
+    if output == "-":
+        # Stdout means no on-disk artefact, so no PNG sibling either.
         sys.stdout.write(svg + "\n")
+        return
+
+    parent = os.path.dirname(os.path.abspath(output))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(output, "w") as f:
+        f.write(svg + "\n")
+    sys.stderr.write(f"wrote {output}\n")
+
+    png = svg_to_png(output)
+    if png:
+        sys.stderr.write(f"wrote {png}\n")
     else:
-        parent = os.path.dirname(os.path.abspath(args.output))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(args.output, "w") as f:
-            f.write(svg + "\n")
+        sys.stderr.write(
+            "note: skipping PNG — install rsvg-convert (apt install librsvg2-bin), "
+            "imagemagick, or inkscape to enable.\n"
+        )
 
 
 def cmd_ping(args):
@@ -685,8 +763,13 @@ def build_parser():
         help="use a logarithmic y-axis (applies to both axes in --double-y)",
     )
     p_plot.add_argument(
-        "-o", "--output", default="-",
-        help="write SVG to this path (default: stdout)",
+        "-o", "--output", default=None,
+        help=(
+            "write SVG to this path. Default: an auto-generated path "
+            "output/{ping,curl,combined}-YYYY-MM-DD--HH-MM-SS.svg "
+            "with a sibling .png. Pass '-' to write SVG to stdout "
+            "(no PNG companion in that case)."
+        ),
     )
     p_plot.set_defaults(func=cmd_plot)
 

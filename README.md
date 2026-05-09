@@ -84,13 +84,27 @@ to stdout:
 ## Plotting
 
 ```sh
-./gnosis_vpn-monitor plot data/ping.txt -o output/ping.svg
-./gnosis_vpn-monitor plot data/curl.txt -o output/curl.svg
+./gnosis_vpn-monitor plot data/ping.txt
+./gnosis_vpn-monitor plot data/curl.txt
 ```
 
-Each input file's type is auto-detected from its content. With no `-o`,
-the SVG goes to stdout (handy for `… | display` or piping into another
-tool).
+Each input file's type is auto-detected from its content. With no
+`-o`, the chart is written to a timestamped path under `output/`:
+
+```
+output/ping-2026-05-09--22-19-39.svg
+output/ping-2026-05-09--22-19-39.png
+```
+
+A sibling PNG is rendered alongside the SVG so the chart drops into
+docs and chat tools that don't speak SVG. The PNG step needs one of
+`rsvg-convert` (debian: `apt install librsvg2-bin`), ImageMagick, or
+Inkscape; if none is installed the SVG is still written and a one-line
+note explains the missing converter.
+
+Pass `-o some/path.svg` to override the location (the `.png` sibling
+follows the same name), or `-o -` to write the SVG to stdout (in which
+case no PNG is generated).
 
 ### Combined chart (`--double-y`)
 
@@ -98,8 +112,8 @@ Plot ping latency and curl throughput on one chart with independent
 left/right y-axes:
 
 ```sh
-./gnosis_vpn-monitor plot --double-y data/ping.txt data/curl.txt \
-    -o output/combined.svg
+./gnosis_vpn-monitor plot --double-y data/ping.txt data/curl.txt
+# → output/combined-2026-05-09--22-19-39.{svg,png}
 ```
 
 The first file is plotted against the left axis (steel blue), the
@@ -108,9 +122,8 @@ second against the right (orange).
 ### Logarithmic y-axis (`--log-y`)
 
 ```sh
-./gnosis_vpn-monitor plot --log-y data/ping.txt -o output/ping_log.svg
-./gnosis_vpn-monitor plot --double-y --log-y data/ping.txt data/curl.txt \
-    -o output/combined_log.svg
+./gnosis_vpn-monitor plot --log-y data/ping.txt
+./gnosis_vpn-monitor plot --double-y --log-y data/ping.txt data/curl.txt
 ```
 
 `--log-y` switches the y-axis to log10. With `--double-y` it applies to
