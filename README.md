@@ -106,6 +106,19 @@ Pass `-o some/path.svg` to override the location (the `.png` sibling
 follows the same name), or `-o -` to write the SVG to stdout (in which
 case no PNG is generated).
 
+### Image size and PNG resolution
+
+```sh
+./gnosis_vpn-monitor plot data/ping.txt --width 2400 --height 1000
+./gnosis_vpn-monitor plot data/ping.txt --png-scale 2     # 3600×1680 PNG
+```
+
+`--width` / `--height` set the SVG dimensions in pixels (default
+1800×840). `--png-scale` multiplies the SVG dimensions when rendering
+the PNG — e.g. `--png-scale 2` gives a PNG with double the pixel
+count of the SVG, useful for retina displays or print without
+inflating the on-disk SVG.
+
 ### Combined chart (`--double-y`)
 
 Plot ping latency and curl throughput on one chart with independent

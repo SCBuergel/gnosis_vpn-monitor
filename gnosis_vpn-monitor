@@ -326,13 +326,18 @@ class Axis:
 # SVG rendering
 # ---------------------------------------------------------------------------
 
-# Chart geometry. Values are pixels.
-WIDTH = 900
-HEIGHT = 420
+# Chart geometry. Values are pixels. Defaults are sized for high-DPI viewing
+# (~2× the original 900×420 prototype) and can be overridden per-invocation
+# via the --width / --height CLI flags.
+DEFAULT_WIDTH = 1800
+DEFAULT_HEIGHT = 840
 MARGIN_LEFT = 80
 MARGIN_RIGHT = 80      # leaves room for an optional second y-axis
 MARGIN_TOP = 30
 MARGIN_BOTTOM = 50
+
+FONT_SIZE = 14         # tick labels and axis titles
+STROKE_WIDTH = 3       # data series polyline
 
 # Series colours. Picked to render legibly on white in both LCD and print.
 LEFT_COLOR = "steelblue"
@@ -342,51 +347,56 @@ RIGHT_COLOR = "darkorange"
 class Plot:
     """SVG geometry helper. One instance corresponds to one chart."""
 
-    def __init__(self, x0, x1):
+    def __init__(self, x0, x1, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
         self.x0 = x0
         self.x1 = x1
+        self.width = width
+        self.height = height
 
     def x_pixel(self, x):
         if self.x1 == self.x0:
             return MARGIN_LEFT
-        span = WIDTH - MARGIN_LEFT - MARGIN_RIGHT
+        span = self.width - MARGIN_LEFT - MARGIN_RIGHT
         return MARGIN_LEFT + (x - self.x0) / (self.x1 - self.x0) * span
 
     def y_pixel(self, y, axis):
         v = axis.transform(y)
-        span = HEIGHT - MARGIN_TOP - MARGIN_BOTTOM
-        return HEIGHT - MARGIN_BOTTOM - (v - axis.lo_t) / (axis.hi_t - axis.lo_t) * span
+        span = self.height - MARGIN_TOP - MARGIN_BOTTOM
+        return self.height - MARGIN_BOTTOM - (v - axis.lo_t) / (axis.hi_t - axis.lo_t) * span
 
     # --- Skeleton -----------------------------------------------------------
 
-    @staticmethod
-    def header():
+    def header(self):
+        # viewBox lets the SVG scale cleanly when embedded at non-native
+        # sizes (browsers, Markdown viewers, the rsvg→PNG step).
         return [
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" '
-            f'height="{HEIGHT}" font-family="sans-serif" font-size="11">',
-            f'<rect width="{WIDTH}" height="{HEIGHT}" fill="white"/>',
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{self.width}" height="{self.height}" '
+            f'viewBox="0 0 {self.width} {self.height}" '
+            f'font-family="sans-serif" font-size="{FONT_SIZE}">',
+            f'<rect width="{self.width}" height="{self.height}" fill="white"/>',
         ]
 
     @staticmethod
     def footer():
         return ["</svg>"]
 
-    @staticmethod
-    def frame():
-        right = WIDTH - MARGIN_RIGHT
-        bottom = HEIGHT - MARGIN_BOTTOM
+    def frame(self):
+        # Single rect = full box around the plot area (left, right, top, bottom).
+        x = MARGIN_LEFT
+        y = MARGIN_TOP
+        w = self.width - MARGIN_LEFT - MARGIN_RIGHT
+        h = self.height - MARGIN_TOP - MARGIN_BOTTOM
         return [
-            f'<line x1="{MARGIN_LEFT}" y1="{MARGIN_TOP}" '
-            f'x2="{MARGIN_LEFT}" y2="{bottom}" stroke="black"/>',
-            f'<line x1="{MARGIN_LEFT}" y1="{bottom}" '
-            f'x2="{right}" y2="{bottom}" stroke="black"/>',
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" '
+            f'fill="none" stroke="black"/>',
         ]
 
     # --- X axis (time) ------------------------------------------------------
 
     def x_axis(self):
         out = []
-        bottom = HEIGHT - MARGIN_BOTTOM
+        bottom = self.height - MARGIN_BOTTOM
         for x in linear_ticks(self.x0, self.x1):
             px = self.x_pixel(x)
             out.append(
@@ -397,8 +407,8 @@ class Plot:
             out.append(
                 f'<text x="{px}" y="{bottom + 18}" text-anchor="middle">{label}</text>'
             )
-        cx = (MARGIN_LEFT + WIDTH - MARGIN_RIGHT) / 2
-        out.append(f'<text x="{cx}" y="{HEIGHT - 10}" text-anchor="middle">time</text>')
+        cx = (MARGIN_LEFT + self.width - MARGIN_RIGHT) / 2
+        out.append(f'<text x="{cx}" y="{self.height - 10}" text-anchor="middle">time</text>')
         return out
 
     # --- Y axis -------------------------------------------------------------
@@ -415,7 +425,7 @@ class Plot:
         """
         out = []
         left = MARGIN_LEFT
-        right = WIDTH - MARGIN_RIGHT
+        right = self.width - MARGIN_RIGHT
 
         # Minor ticks first (they sit visually behind the major marks).
         for v in axis.minor_ticks():
@@ -456,7 +466,7 @@ class Plot:
                     f'fill="{color}">{axis.format(v)}</text>'
                 )
 
-        cy = (MARGIN_TOP + HEIGHT - MARGIN_BOTTOM) / 2
+        cy = (MARGIN_TOP + self.height - MARGIN_BOTTOM) / 2
         x = left - 55 if side == "left" else right + 55
         out.append(
             f'<text x="{x}" y="{cy}" transform="rotate(-90 {x},{cy})" '
@@ -475,10 +485,13 @@ class Plot:
             f"{self.x_pixel(x):.1f},{self.y_pixel(y, axis):.1f}"
             for x, y in visible
         )
-        return [f'<path d="{path}" stroke="{color}" fill="none" stroke-width="2"/>']
+        return [
+            f'<path d="{path}" stroke="{color}" fill="none" '
+            f'stroke-width="{STROKE_WIDTH}"/>'
+        ]
 
 
-def render(series_list, log_y=False):
+def render(series_list, log_y=False, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
     """Render one or two recordings into a complete SVG document.
 
     `series_list` holds ``(kind, points)`` tuples. With one entry the chart
@@ -489,7 +502,7 @@ def render(series_list, log_y=False):
         raise ValueError("render expects 1 or 2 series")
 
     all_xs = [t for _, pts in series_list for t, _ in pts]
-    plot = Plot(min(all_xs), max(all_xs))
+    plot = Plot(min(all_xs), max(all_xs), width=width, height=height)
 
     out = plot.header() + plot.frame()
 
@@ -523,12 +536,16 @@ TIMESTAMP_FORMAT = "%Y-%m-%d--%H-%M-%S"
 #   - ImageMagick 7's `magick` and 6's `convert`
 #   - Inkscape (heavier, but ubiquitous on desktops)
 # If none is installed, the SVG is still written; we just warn that the PNG
-# couldn't be produced. Templates use ``{svg}`` / ``{png}`` placeholders.
+# couldn't be produced. Templates use ``{svg}``/``{png}`` for paths and
+# ``{w}``/``{h}`` for the requested PNG pixel dimensions.
 SVG_TO_PNG_TOOLS = [
-    ["rsvg-convert", "-o", "{png}", "{svg}"],
-    ["magick", "{svg}", "{png}"],
-    ["convert", "{svg}", "{png}"],
-    ["inkscape", "{svg}", "--export-type=png", "--export-filename={png}"],
+    ["rsvg-convert", "-w", "{w}", "-h", "{h}", "-o", "{png}", "{svg}"],
+    ["magick", "{svg}", "-resize", "{w}x{h}", "{png}"],
+    ["convert", "{svg}", "-resize", "{w}x{h}", "{png}"],
+    ["inkscape", "{svg}",
+     "--export-type=png",
+     "--export-width={w}", "--export-height={h}",
+     "--export-filename={png}"],
 ]
 
 
@@ -547,8 +564,12 @@ def auto_output_path(series_list):
     return os.path.join(OUTPUT_DIR, f"{prefix}-{ts}.svg")
 
 
-def svg_to_png(svg_path):
+def svg_to_png(svg_path, svg_width, svg_height, scale=1.0):
     """Render `svg_path` to a sibling .png file.
+
+    The PNG dimensions are ``svg_width × svg_height × scale``, so a
+    --png-scale of 2 yields a 2× higher-pixel-count PNG of the same
+    chart (handy for retina displays or print).
 
     Returns the PNG path on success, or None if no converter on the
     system was able to do the job. Stderr from the converter is
@@ -556,10 +577,15 @@ def svg_to_png(svg_path):
     the caller logs a single suggestion line.
     """
     png_path = os.path.splitext(svg_path)[0] + ".png"
+    w = max(1, int(round(svg_width * scale)))
+    h = max(1, int(round(svg_height * scale)))
     for template in SVG_TO_PNG_TOOLS:
         if not shutil.which(template[0]):
             continue
-        cmd = [arg.format(svg=svg_path, png=png_path) for arg in template]
+        cmd = [
+            arg.format(svg=svg_path, png=png_path, w=w, h=h)
+            for arg in template
+        ]
         try:
             subprocess.run(
                 cmd, check=True,
@@ -699,7 +725,10 @@ def cmd_plot(args):
         )
 
     try:
-        svg = render(series, log_y=args.log_y)
+        svg = render(
+            series, log_y=args.log_y,
+            width=args.width, height=args.height,
+        )
     except ValueError as e:
         sys.exit(str(e))
 
@@ -717,7 +746,7 @@ def cmd_plot(args):
         f.write(svg + "\n")
     sys.stderr.write(f"wrote {output}\n")
 
-    png = svg_to_png(output)
+    png = svg_to_png(output, args.width, args.height, args.png_scale)
     if png:
         sys.stderr.write(f"wrote {png}\n")
     else:
@@ -770,6 +799,20 @@ def build_parser():
             "with a sibling .png. Pass '-' to write SVG to stdout "
             "(no PNG companion in that case)."
         ),
+    )
+    p_plot.add_argument(
+        "--width", type=int, default=DEFAULT_WIDTH,
+        help=f"SVG width in pixels (default: {DEFAULT_WIDTH})",
+    )
+    p_plot.add_argument(
+        "--height", type=int, default=DEFAULT_HEIGHT,
+        help=f"SVG height in pixels (default: {DEFAULT_HEIGHT})",
+    )
+    p_plot.add_argument(
+        "--png-scale", type=float, default=1.0,
+        help="multiplier applied to the SVG dimensions when rendering the "
+             "PNG (e.g. 2.0 doubles the PNG's pixel count for retina/print). "
+             "Default: 1.0",
     )
     p_plot.set_defaults(func=cmd_plot)
 
