@@ -106,6 +106,31 @@ Pass `-o some/path.svg` to override the location (the `.png` sibling
 follows the same name), or `-o -` to write the SVG to stdout (in which
 case no PNG is generated).
 
+### Linestyle, marker, colour (`--style`)
+
+Each series is styled with a matplotlib-style format string. The default
+is `xb` — blue **x** markers, no line — which makes individual samples
+visible without a connecting line that would smooth over outages.
+
+```sh
+./gnosis_vpn-monitor plot data/ping.txt --style o-r        # red solid line + open circles
+./gnosis_vpn-monitor plot data/ping.txt --style '.--g'     # green dashed line + dots
+./gnosis_vpn-monitor plot --double-y data/ping.txt data/curl.txt \
+    --style 'x-b' 's--g'                                   # blue line+x, green dashed+squares
+```
+
+Combine any of these in any order:
+
+| component  | codes                              |
+|------------|------------------------------------|
+| linestyle  | `-` `--` `-.` `:`                  |
+| marker     | `.` `o` `x` `+` `*` `s` `D` `^` `v`|
+| colour     | `b` `g` `r` `c` `m` `y` `k` `w`    |
+
+Pass two strings for `--double-y` to style each series independently;
+pass one and both series share it. Quote any string containing `*` to
+keep the shell from globbing.
+
 ### Image size and PNG resolution
 
 ```sh

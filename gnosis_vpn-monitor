@@ -156,6 +156,94 @@ KIND_FORMATTER = {"ping": format_ms, "curl": format_bytes_per_second}
 
 
 # ---------------------------------------------------------------------------
+# Style parsing (matplotlib-style format strings: "xb", "o-r", ".--g", …)
+# ---------------------------------------------------------------------------
+#
+# Format strings combine three pieces, in any order:
+#   linestyle: "-" solid, "--" dashed, "-." dash-dot, ":" dotted, or absent
+#   marker:    . o x + * s D ^ v   (subset of matplotlib's marker codes)
+#   color:     b g r c m y k w     (the eight one-letter colours)
+# Anything else raises ValueError so typos are caught early.
+
+COLOR_MAP = {
+    "b": "blue",      "g": "green",      "r": "red",       "c": "cyan",
+    "m": "magenta",   "y": "olive",      "k": "black",     "w": "white",
+}
+
+LINESTYLE_DASH = {
+    "-":  None,        # solid (no dash array)
+    "--": "12,6",      # dashed
+    "-.": "10,5,2,5",  # dash-dot
+    ":":  "0,6",       # dotted (relies on stroke-linecap=round, set on the path)
+}
+
+# Marker glyphs as <g> templates. Each is centred on (0, 0); the <use>
+# element's x/y attributes translate the glyph to a data point's pixel
+# position, and `currentColor` picks up the colour from the <use>'s
+# `color` attribute. Sizes are tuned for the default 1800×840 chart.
+MARKER_DEFS = {
+    ".": '<g id="m-dot"><circle r="3" fill="currentColor"/></g>',
+    "o": '<g id="m-circle"><circle r="6" fill="none" stroke="currentColor" stroke-width="2"/></g>',
+    "x": '<g id="m-x"><path d="M-6,-6L6,6M-6,6L6,-6" stroke="currentColor" stroke-width="2" fill="none"/></g>',
+    "+": '<g id="m-plus"><path d="M-6,0L6,0M0,-6L0,6" stroke="currentColor" stroke-width="2" fill="none"/></g>',
+    "s": '<g id="m-square"><rect x="-5" y="-5" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2"/></g>',
+    "D": '<g id="m-diamond"><polygon points="0,-7 6,0 0,7 -6,0" fill="none" stroke="currentColor" stroke-width="2"/></g>',
+    "^": '<g id="m-tri-up"><polygon points="0,-7 6,5 -6,5" fill="none" stroke="currentColor" stroke-width="2"/></g>',
+    "v": '<g id="m-tri-down"><polygon points="0,7 6,-5 -6,-5" fill="none" stroke="currentColor" stroke-width="2"/></g>',
+    "*": '<g id="m-star"><polygon points="0,-7 1.6,-2.2 6.7,-2.2 2.7,0.8 4.1,5.7 0,2.8 -4.1,5.7 -2.7,0.8 -6.7,-2.2 -1.6,-2.2" fill="currentColor"/></g>',
+}
+
+MARKER_HREFS = {
+    ".": "#m-dot",     "o": "#m-circle",    "x": "#m-x",      "+": "#m-plus",
+    "s": "#m-square",  "D": "#m-diamond",   "^": "#m-tri-up", "v": "#m-tri-down",
+    "*": "#m-star",
+}
+
+DEFAULT_COLOR_CODE = "b"  # used when a style string has no colour
+
+
+def parse_style(spec):
+    """Parse a matplotlib-style format string into (linestyle, marker, color).
+
+    Each component is optional. ``linestyle`` and ``marker`` come back as
+    None when absent; ``color`` is normalised to its CSS name (defaulting
+    to blue when the spec doesn't include a colour code).
+    """
+    linestyle = marker = color = None
+    i = 0
+    while i < len(spec):
+        # Two-character linestyles must be matched before the single "-".
+        if spec[i:i + 2] in ("--", "-."):
+            if linestyle is not None:
+                raise ValueError(f"duplicate linestyle in style {spec!r}")
+            linestyle = spec[i:i + 2]
+            i += 2
+            continue
+        ch = spec[i]
+        if ch in ("-", ":"):
+            if linestyle is not None:
+                raise ValueError(f"duplicate linestyle in style {spec!r}")
+            linestyle = ch
+        elif ch in MARKER_DEFS:
+            if marker is not None:
+                raise ValueError(f"duplicate marker in style {spec!r}")
+            marker = ch
+        elif ch in COLOR_MAP:
+            if color is not None:
+                raise ValueError(f"duplicate colour in style {spec!r}")
+            color = ch
+        else:
+            raise ValueError(
+                f"unknown character {ch!r} in style {spec!r} — "
+                "expected one of linestyle (- -- -. :), "
+                f"marker ({' '.join(sorted(MARKER_DEFS))}), "
+                f"or colour ({' '.join(COLOR_MAP)})"
+            )
+        i += 1
+    return linestyle, marker, COLOR_MAP[color or DEFAULT_COLOR_CODE]
+
+
+# ---------------------------------------------------------------------------
 # Tick generation
 # ---------------------------------------------------------------------------
 
@@ -339,9 +427,10 @@ MARGIN_BOTTOM = 50
 FONT_SIZE = 14         # tick labels and axis titles
 STROKE_WIDTH = 3       # data series polyline
 
-# Series colours. Picked to render legibly on white in both LCD and print.
-LEFT_COLOR = "steelblue"
-RIGHT_COLOR = "darkorange"
+# Default --style values (see Style parsing section). One entry per series
+# slot, so a double-y chart gets visually distinct colours by default
+# while a single-series chart uses the user's one-string default.
+DEFAULT_STYLES = ["xb", "xr"]
 
 
 class Plot:
@@ -476,46 +565,88 @@ class Plot:
 
     # --- Data series --------------------------------------------------------
 
-    def series(self, points, axis, color):
-        """Render one polyline. Samples invisible on `axis` are dropped."""
+    def series(self, points, axis, color, linestyle=None, marker=None):
+        """Render one series.
+
+        Samples invisible on `axis` (e.g. zero/negative on a log axis)
+        are dropped. If ``linestyle`` is set, the points are joined by a
+        polyline with the matching dash pattern. If ``marker`` is set,
+        a marker glyph is placed at every visible point.
+        """
         visible = [(x, y) for x, y in points if axis.is_visible(y)]
         if not visible:
             return []
-        path = "M " + " L ".join(
-            f"{self.x_pixel(x):.1f},{self.y_pixel(y, axis):.1f}"
-            for x, y in visible
-        )
-        return [
-            f'<path d="{path}" stroke="{color}" fill="none" '
-            f'stroke-width="{STROKE_WIDTH}"/>'
-        ]
+
+        out = []
+        coords = [(self.x_pixel(x), self.y_pixel(y, axis)) for x, y in visible]
+
+        if linestyle is not None:
+            path = "M " + " L ".join(f"{px:.1f},{py:.1f}" for px, py in coords)
+            attrs = [
+                f'd="{path}"',
+                f'stroke="{color}"',
+                'fill="none"',
+                f'stroke-width="{STROKE_WIDTH}"',
+                'stroke-linecap="round"',
+                'stroke-linejoin="round"',
+            ]
+            dash = LINESTYLE_DASH[linestyle]
+            if dash:
+                attrs.append(f'stroke-dasharray="{dash}"')
+            out.append(f'<path {" ".join(attrs)}/>')
+
+        if marker is not None:
+            href = MARKER_HREFS[marker]
+            for px, py in coords:
+                out.append(
+                    f'<use href="{href}" x="{px:.1f}" y="{py:.1f}" '
+                    f'color="{color}"/>'
+                )
+
+        return out
 
 
-def render(series_list, log_y=False, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT):
+def render(series_list, log_y=False, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
+           styles=None):
     """Render one or two recordings into a complete SVG document.
 
     `series_list` holds ``(kind, points)`` tuples. With one entry the chart
     has a single y-axis on the left. With two entries the second series is
     plotted against an independent right-hand axis (--double-y).
+
+    `styles` is a list of matplotlib-style format strings, one per series.
+    A shorter list is recycled (so passing a single style applies it to
+    both series of a double-y chart).
     """
     if not 1 <= len(series_list) <= 2:
         raise ValueError("render expects 1 or 2 series")
 
+    if styles is None:
+        styles = DEFAULT_STYLES
+    parsed = [
+        parse_style(styles[min(i, len(styles) - 1)])
+        for i in range(len(series_list))
+    ]
+
     all_xs = [t for _, pts in series_list for t, _ in pts]
     plot = Plot(min(all_xs), max(all_xs), width=width, height=height)
 
-    out = plot.header() + plot.frame()
+    out = plot.header()
 
-    kind_l, pts_l = series_list[0]
-    axis_l = Axis(kind_l, [v for _, v in pts_l], log=log_y)
-    out += plot.y_axis(axis_l, side="left", color=LEFT_COLOR)
-    out += plot.series(pts_l, axis_l, color=LEFT_COLOR)
+    # Emit <defs> only for markers actually used, so charts that need no
+    # markers carry no dead weight.
+    markers_used = sorted({m for _, m, _ in parsed if m is not None})
+    if markers_used:
+        out.append("<defs>" + "".join(MARKER_DEFS[m] for m in markers_used) + "</defs>")
 
-    if len(series_list) == 2:
-        kind_r, pts_r = series_list[1]
-        axis_r = Axis(kind_r, [v for _, v in pts_r], log=log_y)
-        out += plot.y_axis(axis_r, side="right", color=RIGHT_COLOR)
-        out += plot.series(pts_r, axis_r, color=RIGHT_COLOR)
+    out += plot.frame()
+
+    sides = ["left", "right"]
+    for i, (kind, pts) in enumerate(series_list):
+        linestyle, marker, color = parsed[i]
+        axis = Axis(kind, [v for _, v in pts], log=log_y)
+        out += plot.y_axis(axis, side=sides[i], color=color)
+        out += plot.series(pts, axis, color=color, linestyle=linestyle, marker=marker)
 
     out += plot.x_axis() + plot.footer()
     return "\n".join(out)
@@ -728,6 +859,7 @@ def cmd_plot(args):
         svg = render(
             series, log_y=args.log_y,
             width=args.width, height=args.height,
+            styles=args.style,
         )
     except ValueError as e:
         sys.exit(str(e))
@@ -813,6 +945,18 @@ def build_parser():
         help="multiplier applied to the SVG dimensions when rendering the "
              "PNG (e.g. 2.0 doubles the PNG's pixel count for retina/print). "
              "Default: 1.0",
+    )
+    p_plot.add_argument(
+        "--style", nargs="+", default=DEFAULT_STYLES, metavar="STYLE",
+        help=(
+            "matplotlib-style format string, one per series. Combine "
+            "linestyle (- -- -. :), marker (. o x + * s D ^ v) and "
+            "colour (b g r c m y k w) in any order. Examples: "
+            "'xb' (default — blue x markers, no line); 'o-r' (red solid "
+            "line + open circles); '.--g' (green dashed line + dots). "
+            f"Default: {' '.join(DEFAULT_STYLES)} "
+            "(first style for the left axis, second for the right)."
+        ),
     )
     p_plot.set_defaults(func=cmd_plot)
 
