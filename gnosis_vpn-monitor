@@ -689,11 +689,17 @@ class Plot:
         line_h = FONT_SIZE * 1.5
         pad = FONT_SIZE * 0.6
         sample_w = FONT_SIZE * 2.5
-        # 0.7 × font size is a generous upper bound on average glyph width
-        # for sans-serif, comfortably covering wide capitals like M/W/V.
-        # We also reserve a third `pad` as right-of-text margin so even an
-        # underestimate can't push the label over the box edge.
-        text_w = max(len(lbl) for lbl, *_ in entries) * FONT_SIZE * 0.7
+        # Estimate label width without a font engine: non-space glyphs in
+        # sans-serif average ~0.7 × font size (generous enough to cover
+        # wide capitals like M/W/V); the space glyph is much narrower
+        # (~0.3 × font size). Counting both at the same rate over-pads
+        # labels like "via VPN" with trailing spaces. We also reserve a
+        # third `pad` as right-of-text margin so a slight underestimate
+        # can't push the label over the box edge.
+        def _approx_width(s):
+            spaces = s.count(" ")
+            return ((len(s) - spaces) * 0.7 + spaces * 0.3) * FONT_SIZE
+        text_w = max(_approx_width(lbl) for lbl, *_ in entries)
         box_w = sample_w + text_w + pad * 3
         box_h = len(entries) * line_h + pad
 
