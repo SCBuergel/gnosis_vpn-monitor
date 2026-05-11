@@ -125,8 +125,12 @@ visible without a connecting line that would smooth over outages.
 ./gnosis_vpn-monitor plot data/ping.txt --style o-r        # red solid line + open circles
 ./gnosis_vpn-monitor plot data/ping.txt --style '.--g'     # green dashed line + dots
 ./gnosis_vpn-monitor plot --double-y data/ping.txt data/curl.txt \
-    --style 'x-b' 's--g'                                   # blue line+x, green dashed+squares
+    --style 'x-b' --style 's--g'                           # blue line+x, green dashed+squares
 ```
+
+`--style` and `--legend` are repeated once per series rather than
+taking multiple values per flag (`-x a -x b` rather than `-x a b`),
+matching the convention of `gcc -D`, `docker -e`, `ssh -L`, etc.
 
 Combine any of these in any order:
 
@@ -152,6 +156,26 @@ keep the shell from globbing.
 the PNG — e.g. `--png-scale 2` gives a PNG with double the pixel
 count of the SVG, useful for retina displays or print without
 inflating the on-disk SVG.
+
+### Comparing two recordings of the same kind
+
+Pass two files of the same kind (two pings or two curls) to plot them
+on a shared y-axis — useful for before/after comparisons:
+
+```sh
+./gnosis_vpn-monitor plot data/curl_baseline.txt data/curl_vpn.txt
+./gnosis_vpn-monitor plot data/curl_baseline.txt data/curl_vpn.txt \
+    --legend "baseline" --legend "via VPN"
+```
+
+The default styles are `xb` (blue x markers, no line) for the first
+series and `or` (red open circles, no line) for the second, so the two
+data sets stand apart without overlapping lines hiding outliers. A
+legend is drawn in the top-right corner; without `--legend`, entries
+default to the file basenames.
+
+Mixing a ping file with a curl file in this mode is rejected — they
+have different units. Use `--double-y` for that.
 
 ### Combined chart (`--double-y`)
 

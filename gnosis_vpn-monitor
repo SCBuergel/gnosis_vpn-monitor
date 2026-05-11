@@ -202,6 +202,15 @@ MARKER_HREFS = {
 DEFAULT_COLOR_CODE = "b"  # used when a style string has no colour
 
 
+def _xml_escape(s):
+    """Escape the XML special characters that appear in legend labels."""
+    return (
+        s.replace("&", "&amp;")
+         .replace("<", "&lt;")
+         .replace(">", "&gt;")
+    )
+
+
 def parse_style(spec):
     """Parse a matplotlib-style format string into (linestyle, marker, color).
 
@@ -427,10 +436,20 @@ MARGIN_BOTTOM = 50
 FONT_SIZE = 14         # tick labels and axis titles
 STROKE_WIDTH = 3       # data series polyline
 
-# Default --style values (see Style parsing section). One entry per series
-# slot, so a double-y chart gets visually distinct colours by default
-# while a single-series chart uses the user's one-string default.
-DEFAULT_STYLES = ["xb", "xr"]
+# Default --style values per chart shape. The defaults are chosen so two
+# series are visually distinct without any flags: distinct colours, and
+# (for shared-y) distinct marker shapes too, since both axes share one
+# scale and can't lean on coloured spines for separation.
+DEFAULT_STYLES_SINGLE = ["xb"]
+DEFAULT_STYLES_DOUBLE_Y = ["xb", "xr"]
+DEFAULT_STYLES_SHARED_Y = ["xb", "or"]
+
+
+def default_styles(num_series, double_y):
+    """Pick the right --style default for the chart shape."""
+    if num_series == 1:
+        return DEFAULT_STYLES_SINGLE
+    return DEFAULT_STYLES_DOUBLE_Y if double_y else DEFAULT_STYLES_SHARED_Y
 
 
 class Plot:
@@ -570,6 +589,69 @@ class Plot:
         )
         return out
 
+    # --- Legend -------------------------------------------------------------
+
+    def legend(self, entries):
+        """Draw a legend box in the chart's top-right corner.
+
+        `entries` is a list of (label, color, linestyle, marker) tuples,
+        one per series. Each row shows a short style sample (line and/or
+        marker) followed by the label. Width is sized to the longest
+        label using a rough monospace approximation — exact pixel
+        measurements aren't possible without a font engine, but we err
+        on the generous side so labels never clip.
+        """
+        if not entries:
+            return []
+
+        line_h = FONT_SIZE * 1.5
+        pad = FONT_SIZE * 0.6
+        sample_w = FONT_SIZE * 2.5
+        # ~0.6 × font size is a safe upper bound on average glyph width
+        # for sans-serif. If a user passes really wide labels they'll
+        # still fit; if they're skinny we waste a few pixels of padding.
+        text_w = max(len(lbl) for lbl, *_ in entries) * FONT_SIZE * 0.6
+        box_w = sample_w + text_w + pad * 2
+        box_h = len(entries) * line_h + pad
+
+        chart_right = self.width - MARGIN_RIGHT
+        chart_top = MARGIN_TOP
+        box_x = chart_right - box_w - 10
+        box_y = chart_top + 10
+
+        out = [
+            f'<rect x="{box_x}" y="{box_y}" width="{box_w}" height="{box_h}" '
+            f'fill="white" stroke="#888" stroke-width="1"/>'
+        ]
+
+        sample_x0 = box_x + pad
+        sample_x1 = sample_x0 + sample_w
+        for i, (label, color, linestyle, marker) in enumerate(entries):
+            cy = box_y + pad / 2 + line_h * (i + 0.5)
+            if linestyle is not None:
+                attrs = [
+                    f'x1="{sample_x0:.1f}"', f'y1="{cy:.1f}"',
+                    f'x2="{sample_x1:.1f}"', f'y2="{cy:.1f}"',
+                    f'stroke="{color}"',
+                    f'stroke-width="{STROKE_WIDTH}"',
+                    'stroke-linecap="round"',
+                ]
+                dash = LINESTYLE_DASH[linestyle]
+                if dash:
+                    attrs.append(f'stroke-dasharray="{dash}"')
+                out.append(f'<line {" ".join(attrs)}/>')
+            if marker is not None:
+                mx = (sample_x0 + sample_x1) / 2
+                out.append(
+                    f'<use href="{MARKER_HREFS[marker]}" '
+                    f'x="{mx:.1f}" y="{cy:.1f}" color="{color}"/>'
+                )
+            out.append(
+                f'<text x="{sample_x1 + pad:.1f}" y="{cy + FONT_SIZE * 0.35:.1f}" '
+                f'fill="black">{_xml_escape(label)}</text>'
+            )
+        return out
+
     # --- Data series --------------------------------------------------------
 
     def series(self, points, axis, color, linestyle=None, marker=None):
@@ -613,23 +695,34 @@ class Plot:
         return out
 
 
-def render(series_list, log_y=False, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
-           styles=None):
+def render(series_list, log_y=False, double_y=False,
+           width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
+           styles=None, labels=None):
     """Render one or two recordings into a complete SVG document.
 
-    `series_list` holds ``(kind, points)`` tuples. With one entry the chart
-    has a single y-axis on the left. With two entries the second series is
-    plotted against an independent right-hand axis (--double-y).
+    Three chart shapes:
+      * 1 series          → one y-axis on the left.
+      * 2 series, double_y=True
+                          → independent left & right y-axes (different
+                             scales — useful for ping vs. curl).
+      * 2 series, double_y=False
+                          → both series share one left y-axis (same
+                             scale — useful for comparing two curls or
+                             two pings). A legend in the top-right
+                             corner disambiguates the series.
 
-    `styles` is a list of matplotlib-style format strings, one per series.
-    A shorter list is recycled (so passing a single style applies it to
-    both series of a double-y chart).
+    `styles`  matplotlib-style format strings, one per series. A shorter
+              list is recycled. None → mode-appropriate default
+              (see ``default_styles``).
+    `labels`  legend entries, one per series. Pass None to suppress the
+              legend on single-series charts; a 2-series chart should
+              normally come with labels (callers default to filenames).
     """
     if not 1 <= len(series_list) <= 2:
         raise ValueError("render expects 1 or 2 series")
 
     if styles is None:
-        styles = DEFAULT_STYLES
+        styles = default_styles(len(series_list), double_y)
     parsed = [
         parse_style(styles[min(i, len(styles) - 1)])
         for i in range(len(series_list))
@@ -646,21 +739,59 @@ def render(series_list, log_y=False, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
     if markers_used:
         out.append("<defs>" + "".join(MARKER_DEFS[m] for m in markers_used) + "</defs>")
 
-    # Tint the left/right verticals to match their series so each spine
-    # visually "owns" its axis. With only one series the right vertical
-    # stays black — there's no second series to attach it to.
-    left_spine = parsed[0][2]
-    right_spine = parsed[1][2] if len(series_list) == 2 else "black"
-    out += plot.frame(left_color=left_spine, right_color=right_spine)
-
-    sides = ["left", "right"]
-    for i, (kind, pts) in enumerate(series_list):
-        linestyle, marker, color = parsed[i]
+    if len(series_list) == 2 and double_y:
+        # Independent axes: tint each vertical spine to match its series.
+        out += plot.frame(left_color=parsed[0][2], right_color=parsed[1][2])
+        sides = ["left", "right"]
+        for i, (kind, pts) in enumerate(series_list):
+            linestyle, marker, color = parsed[i]
+            axis = Axis(kind, [v for _, v in pts], log=log_y)
+            out += plot.y_axis(axis, side=sides[i], color=color)
+            out += plot.series(pts, axis, color=color,
+                               linestyle=linestyle, marker=marker)
+    elif len(series_list) == 2:
+        # Shared single y-axis: combine both series' values to compute
+        # one set of bounds. Spines stay black since the axis isn't
+        # tied to either series — the legend disambiguates instead.
+        kinds = {k for k, _ in series_list}
+        if len(kinds) > 1:
+            raise ValueError(
+                "single y-axis charts need both series to be the same kind "
+                "(both ping or both curl); pass --double-y for mixed plots"
+            )
+        kind = series_list[0][0]
+        all_vals = [v for _, pts in series_list for _, v in pts]
+        axis = Axis(kind, all_vals, log=log_y)
+        out += plot.frame(left_color="black", right_color="black")
+        out += plot.y_axis(axis, side="left", color="black")
+        for (kind_i, pts), (linestyle, marker, color) in zip(series_list, parsed):
+            out += plot.series(pts, axis, color=color,
+                               linestyle=linestyle, marker=marker)
+    else:
+        # Single series.
+        linestyle, marker, color = parsed[0]
+        out += plot.frame(left_color=color, right_color="black")
+        kind, pts = series_list[0]
         axis = Axis(kind, [v for _, v in pts], log=log_y)
-        out += plot.y_axis(axis, side=sides[i], color=color)
-        out += plot.series(pts, axis, color=color, linestyle=linestyle, marker=marker)
+        out += plot.y_axis(axis, side="left", color=color)
+        out += plot.series(pts, axis, color=color,
+                           linestyle=linestyle, marker=marker)
 
-    out += plot.x_axis() + plot.footer()
+    out += plot.x_axis()
+
+    # Legend goes last so it's drawn on top of any data points it covers.
+    if labels:
+        if len(labels) != len(series_list):
+            raise ValueError(
+                f"got {len(labels)} legend labels for {len(series_list)} series"
+            )
+        entries = [
+            (labels[i], parsed[i][2], parsed[i][0], parsed[i][1])
+            for i in range(len(series_list))
+        ]
+        out += plot.legend(entries)
+
+    out += plot.footer()
     return "\n".join(out)
 
 
@@ -693,16 +824,15 @@ SVG_TO_PNG_TOOLS = [
 
 
 def auto_output_path(series_list):
-    """Default SVG path for a chart, e.g. output/ping-2026-05-09--12-30-00.svg.
+    """Default SVG path for a chart, e.g. output/ping-2026-05-10--12-30-00.svg.
 
-    The prefix tracks what's being plotted: a single recording uses its
-    own kind ("ping" or "curl"); a double-y chart uses "combined" since
-    both kinds are on the same plot.
+    The prefix tracks what's being plotted:
+      * single recording        → its own kind ("ping" or "curl")
+      * two recordings, same kind → that kind (e.g. comparing two curls)
+      * two recordings, mixed   → "combined"
     """
-    if len(series_list) == 1:
-        prefix = series_list[0][0]  # "ping" or "curl"
-    else:
-        prefix = "combined"
+    kinds = {k for k, _ in series_list}
+    prefix = kinds.pop() if len(kinds) == 1 else "combined"
     ts = datetime.now().strftime(TIMESTAMP_FORMAT)
     return os.path.join(OUTPUT_DIR, f"{prefix}-{ts}.svg")
 
@@ -873,19 +1003,33 @@ def _stamp(buf):
 def cmd_plot(args):
     if args.double_y and len(args.files) != 2:
         sys.exit("error: --double-y requires exactly two input files")
-    if not args.double_y and len(args.files) != 1:
-        sys.exit("error: expected one file (or two with --double-y)")
+    if not 1 <= len(args.files) <= 2:
+        sys.exit("error: expected one or two input files")
 
     try:
         series = [parse_recording(p) for p in args.files]
     except (FileNotFoundError, ValueError) as e:
         sys.exit(str(e))
 
+    # Two files without --double-y → shared y-axis. Default the legend
+    # labels to the file basenames (without extension) so the chart is
+    # self-describing without forcing the user to spell them out.
+    labels = args.legend
+    if labels is None and len(series) == 2:
+        labels = [os.path.splitext(os.path.basename(p))[0] for p in args.files]
+    if labels is not None and len(labels) != len(series):
+        sys.exit(
+            f"error: --legend got {len(labels)} label(s) for {len(series)} series"
+        )
+
     try:
         svg = render(
-            series, log_y=args.log_y,
+            series,
+            log_y=args.log_y,
+            double_y=args.double_y,
             width=args.width, height=args.height,
             styles=args.style,
+            labels=labels,
         )
     except ValueError as e:
         sys.exit(str(e))
@@ -937,12 +1081,14 @@ def build_parser():
     p_plot.add_argument(
         "files",
         nargs="+",
-        help="one recording file (single chart) or two for --double-y",
+        help="one recording file, or two (same kind: shared y-axis; "
+             "with --double-y: independent left/right y-axes)",
     )
     p_plot.add_argument(
         "--double-y",
         action="store_true",
-        help="plot two recordings on independent left/right y-axes",
+        help="plot two recordings on independent left/right y-axes "
+             "(use this for mixed ping+curl charts)",
     )
     p_plot.add_argument(
         "--log-y",
@@ -973,16 +1119,25 @@ def build_parser():
              "Default: 1.0",
     )
     p_plot.add_argument(
-        "--style", nargs="+", default=DEFAULT_STYLES, metavar="STYLE",
+        "--style", action="append", default=None, metavar="STYLE",
         help=(
-            "matplotlib-style format string, one per series. Combine "
-            "linestyle (- -- -. :), marker (. o x + * s D ^ v) and "
-            "colour (b g r c m y k w) in any order. Examples: "
-            "'xb' (default — blue x markers, no line); 'o-r' (red solid "
-            "line + open circles); '.--g' (green dashed line + dots). "
-            f"Default: {' '.join(DEFAULT_STYLES)} "
-            "(first style for the left axis, second for the right)."
+            "matplotlib-style format string. Pass once per series — "
+            "e.g. --style xb --style or. Combine linestyle (- -- -. :), "
+            "marker (. o x + * s D ^ v) and colour (b g r c m y k w) "
+            "in any order. Examples: 'xb' (blue x markers, no line); "
+            "'o-r' (red solid line + open circles); '.--g' (green "
+            "dashed line + dots). Default depends on chart shape: "
+            "'xb' single-series, 'xb xr' for --double-y, 'xb or' for "
+            "two same-kind series sharing one y-axis."
         ),
+    )
+    p_plot.add_argument(
+        "--legend", action="append", default=None, metavar="LABEL",
+        help="legend entry, repeated once per series — e.g. --legend "
+             "baseline --legend 'via VPN'. Drawn in the chart's "
+             "top-right corner. Default: file basenames (without "
+             "extension) for two-series charts; no legend for "
+             "single-series charts unless --legend is given.",
     )
     p_plot.set_defaults(func=cmd_plot)
 
