@@ -293,6 +293,44 @@ def linear_ticks(lo, hi, n=5):
     return out
 
 
+# Calendar-aligned tick steps for the time axis, in seconds. Picked from
+# this list (rather than the generic 1/2/5 × 10^k ladder) so labels land
+# at human-meaningful intervals — every minute, every 10 minutes, on the
+# hour, every 6 hours, daily, weekly — instead of e.g. every 50 seconds.
+TIME_TICK_STEPS = [
+    1, 2, 5, 10, 15, 30,
+    60, 2 * 60, 5 * 60, 10 * 60, 15 * 60, 30 * 60,
+    3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600,
+    86400, 2 * 86400, 7 * 86400, 14 * 86400, 28 * 86400,
+    90 * 86400, 365 * 86400,
+]
+
+
+def time_ticks(t0, t1, n=5):
+    """Return ~n tick timestamps inside [t0, t1], snapped to a nice
+    calendar-aligned step (see ``TIME_TICK_STEPS``).
+
+    Ticks are anchored to local midnight of t0, so a 6-hour step lands at
+    00:00 / 06:00 / 12:00 / 18:00 local time and a 1-day step lands at
+    midnight. DST transitions are ignored — at worst they shift a tick by
+    an hour, which doesn't hurt a chart.
+    """
+    if t1 <= t0:
+        return [t0]
+    raw = (t1 - t0) / n
+    step = next((s for s in TIME_TICK_STEPS if s >= raw), TIME_TICK_STEPS[-1])
+    origin = datetime.fromtimestamp(t0).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).timestamp()
+    out = []
+    k = math.ceil((t0 - origin) / step - 1e-9)
+    v = origin + k * step
+    while v <= t1 + step * 1e-9:
+        out.append(v)
+        v += step
+    return out
+
+
 def log_decade_ticks(lo, hi):
     """Decade tick values (..., 1, 10, 100, ...) that fall inside [lo, hi].
 
@@ -512,18 +550,62 @@ class Plot:
     def x_axis(self):
         out = []
         bottom = self.height - MARGIN_BOTTOM
-        for x in linear_ticks(self.x0, self.x1):
-            px = self.x_pixel(x)
+        ticks = time_ticks(self.x0, self.x1)
+        step = ticks[1] - ticks[0] if len(ticks) > 1 else (self.x1 - self.x0)
+
+        # Pick time-of-day format from the step: drop seconds once the
+        # spacing is at least a minute, drop time-of-day entirely once
+        # the spacing is a full day or more (the date is the only
+        # information the tick carries at that point).
+        if step >= 86400:
+            time_fmt = None
+        elif step >= 60:
+            time_fmt = "%H:%M"
+        else:
+            time_fmt = "%H:%M:%S"
+
+        dates = [datetime.fromtimestamp(t).date() for t in ticks]
+        # Stack a date row under sub-day tick labels when the span crosses
+        # midnight; otherwise every tick shares one date and the row is noise.
+        show_date_row = time_fmt is not None and len(set(dates)) > 1
+
+        prev_date = None
+        for t, d in zip(ticks, dates):
+            px = self.x_pixel(t)
             out.append(
                 f'<line x1="{px}" y1="{bottom}" x2="{px}" y2="{bottom + 4}" '
                 f'stroke="black"/>'
             )
-            label = datetime.fromtimestamp(x).strftime("%H:%M:%S")
+            dt = datetime.fromtimestamp(t)
+            if time_fmt is None:
+                out.append(
+                    f'<text x="{px}" y="{bottom + 18}" text-anchor="middle">'
+                    f'{dt.strftime("%Y-%m-%d")}</text>'
+                )
+            else:
+                out.append(
+                    f'<text x="{px}" y="{bottom + 18}" text-anchor="middle">'
+                    f'{dt.strftime(time_fmt)}</text>'
+                )
+                # Label the date only when it changes (including the first
+                # tick) so the row reads as "Mar 4 … Mar 5 …" rather than
+                # repeating the same date across every tick.
+                if show_date_row and d != prev_date:
+                    out.append(
+                        f'<text x="{px}" y="{bottom + 18 + FONT_SIZE + 2}" '
+                        f'text-anchor="middle" fill="#666">'
+                        f'{dt.strftime("%Y-%m-%d")}</text>'
+                    )
+            prev_date = d
+
+        # Suppress the redundant "time" axis title when the date row is
+        # present — the dates effectively label the axis, and the title
+        # would otherwise crowd them.
+        if not show_date_row:
+            cx = (MARGIN_LEFT + self.width - MARGIN_RIGHT) / 2
             out.append(
-                f'<text x="{px}" y="{bottom + 18}" text-anchor="middle">{label}</text>'
+                f'<text x="{cx}" y="{self.height - 10}" text-anchor="middle">time</text>'
             )
-        cx = (MARGIN_LEFT + self.width - MARGIN_RIGHT) / 2
-        out.append(f'<text x="{cx}" y="{self.height - 10}" text-anchor="middle">time</text>')
         return out
 
     # --- Y axis -------------------------------------------------------------
@@ -607,11 +689,12 @@ class Plot:
         line_h = FONT_SIZE * 1.5
         pad = FONT_SIZE * 0.6
         sample_w = FONT_SIZE * 2.5
-        # ~0.6 × font size is a safe upper bound on average glyph width
-        # for sans-serif. If a user passes really wide labels they'll
-        # still fit; if they're skinny we waste a few pixels of padding.
-        text_w = max(len(lbl) for lbl, *_ in entries) * FONT_SIZE * 0.6
-        box_w = sample_w + text_w + pad * 2
+        # 0.7 × font size is a generous upper bound on average glyph width
+        # for sans-serif, comfortably covering wide capitals like M/W/V.
+        # We also reserve a third `pad` as right-of-text margin so even an
+        # underestimate can't push the label over the box edge.
+        text_w = max(len(lbl) for lbl, *_ in entries) * FONT_SIZE * 0.7
+        box_w = sample_w + text_w + pad * 3
         box_h = len(entries) * line_h + pad
 
         chart_right = self.width - MARGIN_RIGHT
